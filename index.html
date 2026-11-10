@@ -228,9 +228,26 @@ async function initCloud(){
   }catch(e){
     console.error("Firebase:", e);
     const status=document.getElementById("cloudStatus");
-    if(status) status.textContent="modo local • nuvem indisponível";
+    if(status) status.textContent="nuvem indisponível • "+(e.code||e.message||"erro de conexão");
+    window.lastCloudError=e;
     return false;
   }
+}
+
+function explainCloudError(e){
+  const code=String(e?.code||"");
+  const msg=String(e?.message||"");
+  if(code.includes("auth/operation-not-allowed"))
+    return "O Firebase está com o login anônimo desativado. No Firebase Console, ative Authentication > Sign-in method > Anonymous.";
+  if(code.includes("auth/unauthorized-domain"))
+    return "O endereço do GitHub Pages não está autorizado no Firebase. Adicione arthur302023-beep.github.io em Authentication > Settings > Authorized domains.";
+  if(code.includes("permission-denied")||code.includes("firestore/permission-denied"))
+    return "O Firestore recusou o acesso. É necessário ajustar as regras do banco para permitir leitura pública da votação e gravação de votos, mantendo a criação/edição protegida.";
+  if(code.includes("resource-exhausted")||/maximum.*size|1\s*MiB|document.*too large/i.test(msg))
+    return "A votação ficou grande demais para um único documento do Firestore (limite de 1 MiB). As fotos precisam ser armazenadas separadamente ou reduzidas.";
+  if(code.includes("unavailable")||code.includes("network"))
+    return "Não foi possível alcançar o Firebase. Confira a internet e tente novamente.";
+  return "Detalhe do Firebase: "+(code||msg||"erro não identificado");
 }
 
 function cloudPollRef(id){ return cloudDb.collection("polls").doc(id); }
@@ -491,7 +508,7 @@ async function editExistingPersonPhoto(pid,xid,input){
   renderDraft();alert('Imagem do participante atualizada!');
  }catch(e){alert('Não foi possível atualizar a imagem: '+e.message)}
 }
-function createPoll(){
+async function createPoll(){
  if(creatingPoll)return;
  let title=$('pollTitle').value.trim();if(!title)return alert('Dê um nome para a votação.');
  if(draft.people.length<2)return alert('Adicione pelo menos 2 participantes.');
@@ -507,15 +524,23 @@ function createPoll(){
   p.people.forEach(x=>{const old=editing.people.find(y=>y.id===x.id)||editing.people.find(y=>y.name.trim().toLowerCase()===x.name.trim().toLowerCase());if(old){x.id=old.id;x.votes=Number(old.votes)||0;x.ghostVotes=Number(old.ghostVotes)||0;x.partialStatus=old.partialStatus||x.partialStatus;x.partialChance=old.partialChance??x.partialChance;x.ghostBias=Number(old.ghostBias)||0}});
   db.polls=db.polls.map(x=>x.id===p.id?p:x);editPollId=null;
   if(!persist()){finish();return}
-  if(cloudReady)cloudSavePoll(p).catch(console.error);
-  alert('VOTAÇÃO ATUALIZADA!');finish();openManage(p.id);return;
+  if(cloudReady){
+   try{await cloudSavePoll(p);alert('VOTAÇÃO ATUALIZADA E SINCRONIZADA NA NUVEM!')}
+   catch(e){console.error('Falha ao sincronizar atualização:',e);alert('A votação foi atualizada neste aparelho, mas NÃO foi sincronizada.\\n\\n'+explainCloudError(e))}
+  }else{alert('A votação foi atualizada apenas neste aparelho. A nuvem não está conectada.\\n\\n'+explainCloudError(window.lastCloudError))}
+  finish();openManage(p.id);return;
  }
  p.people.forEach(x=>{x.votes=0;x.ghostVotes=0});
  if(p.source==='ghost')generateGhost(p);
  db.polls.unshift(p);
  if(!persist()){db.polls=db.polls.filter(x=>x.id!==p.id);finish();return}
- if(cloudReady)cloudSavePoll(p).catch(e=>{console.error(e);alert('A votação foi salva neste aparelho, mas houve falha ao sincronizar online.')});
- alert('VOTAÇÃO CRIADA!');finish();openManage(p.id);
+ if(cloudReady){
+  try{await cloudSavePoll(p);alert('VOTAÇÃO CRIADA E PUBLICADA NA NUVEM! Já pode compartilhar o link.')}
+  catch(e){console.error('Falha ao sincronizar nova votação:',e);alert('A votação foi salva neste aparelho, mas NÃO foi publicada na nuvem. Não compartilhe o link ainda.\\n\\n'+explainCloudError(e))}
+ }else{
+  alert('A votação foi salva somente neste aparelho. A nuvem não conectou, então o público de outros celulares não conseguirá encontrá-la.\\n\\n'+explainCloudError(window.lastCloudError));
+ }
+ finish();openManage(p.id);
 }
 function generateGhost(p){
  let lo=p.ghostRandom?Math.min(p.ghostMin,p.ghostMax):p.ghostTotal,hi=p.ghostRandom?Math.max(p.ghostMin,p.ghostMax):p.ghostTotal;
@@ -969,17 +994,20 @@ async function generateVideo(id,kind){
 }
 
 async function boot(){
- // A interface local deve abrir mesmo se a conexão com o Firebase demorar ou falhar.
- let m=location.hash.match(/^#vote=([^&]+)$/);
- if(m){publicPage(decodeURIComponent(m[1]));}
+ // Mostra a interface imediatamente; se for link público, busca a votação online após conectar.
+ const publicMatch=location.hash.match(/^#vote=([^&]+)$/);
+ if(publicMatch){publicPage(decodeURIComponent(publicMatch[1]));}
  else {renderPollList();}
  const status=document.getElementById("cloudStatus");
  if(status)status.textContent="conectando à nuvem…";
- initCloud().catch(error=>{
+ try{
+   const connected=await initCloud();
+   if(connected && publicMatch) await publicPage(decodeURIComponent(publicMatch[1]));
+ }catch(error){
    console.error("Falha ao iniciar a nuvem:",error);
    const el=document.getElementById("cloudStatus");
-   if(el)el.textContent="modo local • nuvem indisponível";
- });
+   if(el)el.textContent="modo local • "+(error.code||error.message||"nuvem indisponível");
+ }
 }
 window.addEventListener('storage',()=>{db=loadDB();if(currentId)renderManage()});
 window.addEventListener('beforeunload',saveDB);
